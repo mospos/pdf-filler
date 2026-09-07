@@ -67,13 +67,40 @@
   .layer{position:absolute;inset:0}
   .pagenum{position:absolute;left:0;right:0;bottom:-18px;text-align:center;color:var(--muted);font-size:11px}
 
-  /* ---------- empty state ---------- */
+  /* ---------- start screen ---------- */
   #empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
-         justify-content:center;gap:14px;text-align:center;color:var(--muted);padding:20px}
+         justify-content:flex-start;gap:22px;text-align:center;color:var(--muted);
+         padding:38px 20px 60px;overflow:auto}
   #empty h2{margin:0;color:var(--ink);font-size:19px}
-  #empty .drop{border:2px dashed var(--line);border-radius:14px;padding:38px 54px;background:#fff}
+  #empty .drop{border:2px dashed var(--line);border-radius:14px;padding:34px 54px;background:#fff;
+        width:min(1000px,100%)}
   #empty.hot .drop{border-color:var(--accent);background:#eef4ff}
   #empty small{display:block;margin-top:8px}
+
+  /* ---------- saved documents ---------- */
+  #library{width:min(1000px,100%);display:none;text-align:left}
+  #library.on{display:block}
+  #library .head{display:flex;align-items:baseline;gap:10px;margin:0 2px 12px}
+  #library .head h3{margin:0;font-size:14px;color:var(--ink);letter-spacing:.02em}
+  #library .head span{font-size:12px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:15px}
+  .card{position:relative;background:#fff;border:1px solid var(--line);border-radius:12px;
+        padding:10px;cursor:pointer;text-align:left;transition:.15s}
+  .card:hover{border-color:var(--accent);box-shadow:0 5px 16px rgba(16,24,40,.11)}
+  .card .shot{height:152px;background:#eef1f5;border-radius:8px;overflow:hidden;
+        display:flex;align-items:center;justify-content:center;margin-bottom:9px}
+  .card .shot img{max-width:100%;max-height:100%;display:block}
+  .card .nm{color:var(--ink);font-weight:600;font-size:13px;overflow:hidden;
+        text-overflow:ellipsis;white-space:nowrap}
+  .card .meta{font-size:11.5px;color:var(--muted);margin-top:3px}
+  .card .x{position:absolute;top:-8px;right:-8px;width:23px;height:23px;border-radius:50%;
+        background:var(--danger);color:#fff;border:2px solid #fff;font-size:13px;line-height:19px;
+        text-align:center;font-weight:700;opacity:0;transition:.15s}
+  .card:hover .x{opacity:1}
+  .savestate{color:var(--muted);font-size:12px;min-width:76px}
+
+  /* things that only make sense with a document open */
+  body:not(.has-doc) .needs-doc{display:none!important}
 
   /* ---------- annotations ---------- */
   .ann{position:absolute;cursor:move;user-select:none}
@@ -135,20 +162,22 @@
   <div class="brand">PDF <span>Filler</span></div>
   <button class="btn primary" id="openBtn">Open PDF</button>
   <input type="file" id="fileInput" accept="application/pdf,.pdf" hidden>
+  <button class="btn needs-doc" id="closeBtn" title="Back to your documents">My Documents</button>
   <span class="fname" id="fileName">No file open</span>
+  <span class="savestate needs-doc" id="saveState"></span>
   <div class="spacer"></div>
-  <div class="zoom">
+  <div class="zoom needs-doc">
     <button class="btn" id="zoomOut" title="Zoom out">&minus;</button>
     <b id="zoomLabel">100%</b>
     <button class="btn" id="zoomIn" title="Zoom in">+</button>
     <button class="btn" id="zoomFit">Fit</button>
   </div>
-  <button class="btn" id="undoBtn" title="Ctrl+Z">Undo</button>
-  <button class="btn ghostdanger" id="clearBtn">Clear All</button>
-  <button class="btn primary" id="saveBtn">Save Filled PDF</button>
+  <button class="btn needs-doc" id="undoBtn" title="Ctrl+Z">Undo</button>
+  <button class="btn ghostdanger needs-doc" id="clearBtn">Clear All</button>
+  <button class="btn primary needs-doc" id="saveBtn">Export Filled PDF</button>
 </div>
 
-<div class="tools">
+<div class="tools needs-doc">
   <button class="tool active" data-tool="select" title="Move and edit (Esc)">
     <svg viewBox="0 0 24 24"><path d="M4 3l7 17 2-6 6-2z"/></svg>Select</button>
   <button class="tool" data-tool="text" title="Click anywhere to type">
@@ -188,6 +217,10 @@
     <div class="drop">
       <h2>Drop a PDF here</h2>
       <small>or use <b>Open PDF</b> above &mdash; nothing leaves this computer</small>
+    </div>
+    <div id="library">
+      <div class="head"><h3>Your Documents</h3><span id="libCount"></span></div>
+      <div class="cards" id="cards"></div>
     </div>
   </div>
 </div>
@@ -282,6 +315,8 @@ var selId=null;
 var undoStack=[];
 var pendingImage=null;       // {src,w,h,targetW} waiting for a click to land
 var saveHandle=null;         // the file this document was last saved to
+var docId=null;              // which stored document is open
+var saveTimer=null;          // debounce for keeping the store up to date
 
 /* ---------------- helpers ---------------- */
 function toast(msg,ms){
@@ -293,12 +328,14 @@ function snapshot(){
   undoStack.push(JSON.stringify(anns));
   if(undoStack.length>60) undoStack.shift();
   $('#undoBtn').disabled=false;
+  touch();
 }
 function undo(){
   if(!undoStack.length) return;
   anns=JSON.parse(undoStack.pop());
   selId=null; drawLayers();
   $('#undoBtn').disabled=!undoStack.length;
+  touch();
 }
 function today(){
   var d=new Date(), p=function(n){ return String(n).padStart(2,'0'); };
@@ -334,25 +371,211 @@ document.addEventListener('drop',function(e){
   if(f && /\.pdf$/i.test(f.name)) openFile(f);
 });
 
+/* ---------------- the documents kept inside the app ----------------
+   IndexedDB, on this device only: 'files' holds the original PDF bytes once,
+   'docs' holds the name, thumbnail and everything you have written on it.
+   Only 'docs' is rewritten as you work, so autosave never recopies the PDF. */
+var DBP=null;
+function db(){
+  if(DBP) return DBP;
+  DBP=new Promise(function(res,rej){
+    var r=indexedDB.open('pdffiller',1);
+    r.onupgradeneeded=function(e){
+      var d=e.target.result;
+      if(!d.objectStoreNames.contains('docs')) d.createObjectStore('docs',{keyPath:'id'});
+      if(!d.objectStoreNames.contains('files')) d.createObjectStore('files',{keyPath:'id'});
+    };
+    r.onsuccess=function(){ res(r.result); };
+    r.onerror=function(){ rej(r.error); };
+  });
+  return DBP;
+}
+function tx(stores,mode,fn){
+  return db().then(function(d){
+    return new Promise(function(res,rej){
+      var t=d.transaction(stores,mode), out=fn(t);
+      t.oncomplete=function(){ res(out && out.result!==undefined ? out.result : out); };
+      t.onerror=function(){ rej(t.error); };
+      t.onabort=function(){ rej(t.error||new Error('storage aborted')); };
+    });
+  });
+}
+function docsAll(){ return tx(['docs'],'readonly',function(t){ return t.objectStore('docs').getAll(); }); }
+function docGet(id){ return tx(['docs'],'readonly',function(t){ return t.objectStore('docs').get(id); }); }
+function fileGet(id){ return tx(['files'],'readonly',function(t){ return t.objectStore('files').get(id); }); }
+function docDel(id){
+  return tx(['docs','files'],'readwrite',function(t){
+    t.objectStore('docs').delete(id); t.objectStore('files').delete(id);
+  });
+}
+
+function stamp(){
+  var d=new Date(), p=function(n){ return String(n).padStart(2,'0'); };
+  return p(d.getHours())+':'+p(d.getMinutes());
+}
+/* write the marks (and nothing heavy) back to the store */
+function storeWork(){
+  if(!docId) return Promise.resolve();
+  return docGet(docId).then(function(rec){
+    if(!rec) return;
+    rec.anns=anns; rec.seq=seq; rec.updatedAt=Date.now();
+    return tx(['docs'],'readwrite',function(t){ t.objectStore('docs').put(rec); });
+  }).then(function(){
+    $('#saveState').textContent='Saved '+stamp();
+  },function(err){
+    console.warn('could not save into the app:',err);
+    $('#saveState').textContent='Not saved';
+  });
+}
+/* write anything pending right now — before opening something else, or leaving */
+function flush(){
+  clearTimeout(saveTimer);
+  return docId?storeWork():Promise.resolve();
+}
+document.addEventListener('visibilitychange',function(){
+  if(document.visibilityState==='hidden') flush();
+});
+
+/* called wherever a mark changes */
+function touch(){
+  if(!docId) return;
+  $('#saveState').textContent='Saving…';
+  clearTimeout(saveTimer);
+  saveTimer=setTimeout(storeWork,700);
+}
+
+function thumbOf(){
+  return pdfDoc.getPage(1).then(function(pg){
+    var v=pg.getViewport({scale:1});
+    var vp=pg.getViewport({scale:Math.min(1,240/v.width)});
+    var c=document.createElement('canvas');
+    c.width=Math.ceil(vp.width); c.height=Math.ceil(vp.height);
+    return pg.render({canvasContext:c.getContext('2d'),viewport:vp}).promise.then(function(){
+      return c.toDataURL('image/jpeg',0.72);
+    });
+  }).catch(function(){ return null; });
+}
+
+/* ---------------- opening ---------------- */
 function openFile(file){
   busy(true);
-  file.arrayBuffer().then(function(buf){
-    origBytes=new Uint8Array(buf.slice(0));
-    return pdfjsLib.getDocument({data:new Uint8Array(buf.slice(0))}).promise;
-  }).then(function(doc){
-    pdfDoc=doc;
-    fileLabel=file.name||'document.pdf';
-    $('#fileName').textContent=fileLabel+'  ('+doc.numPages+(doc.numPages===1?' page)':' pages)');
-    anns=[]; undoStack=[]; selId=null; seq=1; saveHandle=null;
-    $('#undoBtn').disabled=true;
-    empty.style.display='none';
-    return renderPages(true);
-  }).then(function(){
-    busy(false); toast('Opened '+fileLabel);
-  }).catch(function(err){
+  flush().then(function(){ return file.arrayBuffer(); }).then(function(buf){
+    return show(buf,file.name||'document.pdf',null).then(function(){
+      var id='d'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+      docId=id;
+      return thumbOf().then(function(thumb){
+        return tx(['docs','files'],'readwrite',function(t){
+          t.objectStore('files').put({id:id,bytes:buf});
+          t.objectStore('docs').put({id:id,name:fileLabel,thumb:thumb,
+            pages:pdfDoc.numPages,addedAt:Date.now(),updatedAt:Date.now(),anns:[],seq:1});
+        });
+      }).then(function(){
+        $('#saveState').textContent='Saved '+stamp();
+      },function(err){
+        console.warn('could not keep this document in the app:',err);
+        docId=null;
+        toast('Opened, but there was no room to keep it in the app');
+      });
+    });
+  }).then(function(){ busy(false); })
+  .catch(function(err){
     console.error(err); busy(false);
     alert('Could not open that PDF.\n\n'+err.message);
   });
+}
+
+function openStored(id){
+  busy(true);
+  flush().then(function(){
+    return Promise.all([docGet(id),fileGet(id)]);
+  }).then(function(r){
+    var rec=r[0], f=r[1];
+    if(!rec||!f) throw new Error('That document is no longer in the app.');
+    return show(f.bytes,rec.name,rec).then(function(){
+      docId=id;
+      $('#saveState').textContent='Saved '+stamp();
+    });
+  }).then(function(){ busy(false); })
+  .catch(function(err){
+    console.error(err); busy(false);
+    alert('Could not open that document.\n\n'+err.message);
+  });
+}
+
+/* put a PDF on screen; rec carries the marks when reopening a stored one */
+function show(buf,name,rec){
+  origBytes=new Uint8Array(buf.slice(0));
+  return pdfjsLib.getDocument({data:new Uint8Array(buf.slice(0))}).promise.then(function(doc){
+    pdfDoc=doc;
+    fileLabel=name;
+    anns=(rec&&rec.anns)?rec.anns:[];
+    seq=(rec&&rec.seq)?rec.seq:1;
+    docId=null; undoStack=[]; selId=null; saveHandle=null;
+    $('#undoBtn').disabled=true;
+    $('#fileName').textContent=fileLabel+'  ('+doc.numPages+(doc.numPages===1?' page)':' pages)');
+    $('#saveState').textContent='';
+    document.body.classList.add('has-doc');
+    empty.style.display='none';
+    setTool('select');
+    return renderPages(true);
+  });
+}
+
+/* ---------------- back to the list ---------------- */
+function closeDoc(){
+  var done=docId?storeWork():Promise.resolve();
+  return done.then(function(){
+    clearTimeout(saveTimer);
+    pdfDoc=null; origBytes=null; anns=[]; undoStack=[]; selId=null;
+    docId=null; saveHandle=null; pendingImage=null;
+    $('#pages').innerHTML='';
+    $('#fileName').textContent='No file open';
+    $('#saveState').textContent='';
+    document.body.classList.remove('has-doc');
+    empty.style.display='';
+    return renderLibrary();
+  });
+}
+$('#closeBtn').onclick=closeDoc;
+
+function renderLibrary(){
+  return docsAll().then(function(list){
+    list.sort(function(a,b){ return (b.updatedAt||0)-(a.updatedAt||0); });
+    var box=$('#cards');
+    box.innerHTML='';
+    $('#library').classList.toggle('on',list.length>0);
+    $('#libCount').textContent=list.length?(list.length+(list.length===1?' document':' documents')):'';
+    list.forEach(function(rec){
+      var marks=(rec.anns||[]).length;
+      var c=document.createElement('div');
+      c.className='card';
+      c.title=rec.name;
+      var shot=document.createElement('div'); shot.className='shot';
+      if(rec.thumb){ var im=document.createElement('img'); im.src=rec.thumb; shot.appendChild(im); }
+      var nm=document.createElement('div'); nm.className='nm'; nm.textContent=rec.name;
+      var meta=document.createElement('div'); meta.className='meta';
+      meta.textContent=when(rec.updatedAt)+' · '+rec.pages+(rec.pages===1?' page':' pages')+
+                       ' · '+marks+(marks===1?' mark':' marks');
+      var x=document.createElement('div'); x.className='x'; x.textContent='×';
+      x.onclick=function(e){
+        e.stopPropagation();
+        if(!confirm('Remove "'+rec.name+'" from the app? Anything you wrote on it goes too.')) return;
+        docDel(rec.id).then(renderLibrary);
+      };
+      c.appendChild(shot); c.appendChild(nm); c.appendChild(meta); c.appendChild(x);
+      c.onclick=function(){ openStored(rec.id); };
+      box.appendChild(c);
+    });
+  }).catch(function(err){ console.warn('could not list documents:',err); });
+}
+
+function when(ms){
+  if(!ms) return '';
+  var d=new Date(ms), n=new Date();
+  var p=function(v){ return String(v).padStart(2,'0'); };
+  var sameDay=d.toDateString()===n.toDateString();
+  if(sameDay) return p(d.getHours())+':'+p(d.getMinutes());
+  return p(d.getMonth()+1)+'/'+p(d.getDate())+'/'+d.getFullYear();
 }
 
 /* ---------------- rendering ---------------- */
@@ -536,7 +759,7 @@ function editText(el,a){
     return el.innerText.replace(/\u00a0/g,' ').replace(/\r/g,'').replace(/\n$/,'');
   }
   /* commit on every keystroke, so nothing depends on a blur arriving */
-  function onInput(){ a.text=read(); }
+  function onInput(){ a.text=read(); touch(); }
   function onPaste(ev){
     ev.preventDefault();
     var t=(ev.clipboardData||window.clipboardData).getData('text/plain');
@@ -585,6 +808,7 @@ function onAnnDown(e,a,el){
     try{ el.releasePointerCapture(e.pointerId); }catch(err){}
     el.removeEventListener('pointermove',move);
     el.removeEventListener('pointerup',up);
+    if(snapped) touch();          /* keep where it was actually dropped */
   }
   el.addEventListener('pointermove',move);
   el.addEventListener('pointerup',up);
@@ -607,6 +831,7 @@ function startResize(e,a){
     try{ el.releasePointerCapture(e.pointerId); }catch(err){}
     el.removeEventListener('pointermove',move);
     el.removeEventListener('pointerup',up);
+    touch();                      /* keep the size it was let go at */
   }
   el.addEventListener('pointermove',move);
   el.addEventListener('pointerup',up);
@@ -686,6 +911,7 @@ document.addEventListener('keydown',function(e){
     if(e.key==='ArrowDown') a.y+=d;
     var el=$$('#pages .ann').filter(function(n){ return n.dataset.id===String(a.id); })[0];
     if(el){ el.style.left=px(a.x); el.style.top=px(a.y); }
+    touch();
   }
 });
 
@@ -1122,7 +1348,10 @@ loadScript(['lib/pdf.min.js','https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11
   pdfjsLib.GlobalWorkerOptions.workerSrc=used.replace('pdf.min.js','pdf.worker.min.js');
   return loadScript(['lib/pdf-lib.min.js','https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js']);
 })
-.then(function(){ PDFLib=window.PDFLib; })
+.then(function(){
+  PDFLib=window.PDFLib;
+  return renderLibrary();          /* show what the app is already holding */
+})
 .catch(function(e){
   console.error(e);
   document.querySelector('#empty .drop').innerHTML=
