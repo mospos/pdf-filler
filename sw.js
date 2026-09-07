@@ -1,6 +1,6 @@
 /* PDF Filler service worker — keeps the app usable with no network.
    Bump CACHE whenever a file below changes, so browsers pick the new one up. */
-var CACHE = 'pdf-filler-v3';
+var CACHE = 'pdf-filler-v4';
 var ASSETS = [
   './',
   './index.html',
