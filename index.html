@@ -462,15 +462,20 @@ function openFile(file){
   flush().then(function(){ return file.arrayBuffer(); }).then(function(buf){
     return show(buf,file.name||'document.pdf',null).then(function(){
       var id='d'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
-      docId=id;
+      /* write the record BEFORE claiming the id: anything typed while the
+         thumbnail renders belongs to this document, not to a record that
+         does not exist yet */
       return thumbOf().then(function(thumb){
         return tx(['docs','files'],'readwrite',function(t){
           t.objectStore('files').put({id:id,bytes:buf});
           t.objectStore('docs').put({id:id,name:fileLabel,thumb:thumb,
-            pages:pdfDoc.numPages,addedAt:Date.now(),updatedAt:Date.now(),anns:[],seq:1});
+            pages:pdfDoc.numPages,addedAt:Date.now(),updatedAt:Date.now(),
+            anns:anns,seq:seq});
         });
       }).then(function(){
+        docId=id;
         $('#saveState').textContent='Saved '+stamp();
+        return storeWork();
       },function(err){
         console.warn('could not keep this document in the app:',err);
         docId=null;
