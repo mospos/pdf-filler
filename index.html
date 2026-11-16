@@ -1338,7 +1338,10 @@ function buildPdf(name,target){
       });
     });
 
-    return chain.then(function(){ return doc.save(); });
+      return chain.then(function(){
+      try{ doc.catalog.delete(PDFLib.PDFName.of('Perms')); }catch(e){}
+      return doc.save();
+    });
   }).then(function(out){
     return Promise.resolve(target).then(function(handle){
       if(handle==='cancelled'){ busy(false); toast('Save cancelled'); return; }
